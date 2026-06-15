@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+*_mapper_output/
+data/
+!data/models/
+data/models/*
+!data/models/.gitkeep
+.DS_Store
