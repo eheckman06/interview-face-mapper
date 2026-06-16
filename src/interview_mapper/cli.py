@@ -9,6 +9,7 @@ import click
 from .faces import discover_videos
 from .label_ui import generate_label_ui, load_labels
 from .pipeline import rebuild_analysis, run_analysis, run_finalize
+from .publish import publish_job
 from .screengrab import generate_named_screengrab
 from .web_app import serve
 
@@ -179,6 +180,30 @@ def serve_cmd(host: str, port: int, data_dir: Optional[Path], open: bool, browse
         serve(host=host, port=port, data_dir=data_dir, open_browser=open, browser=browser)
     except RuntimeError as exc:
         raise click.ClickException(str(exc)) from exc
+
+
+@main.command("publish")
+@click.argument("job_id")
+@click.option(
+    "--data-dir",
+    type=click.Path(file_okay=False, path_type=Path),
+    default=None,
+    help="Project data directory (defaults to ./data).",
+)
+@click.option(
+    "--output",
+    "-o",
+    type=click.Path(file_okay=False, path_type=Path),
+    default=None,
+    help="Where to write the static site (defaults to <data-dir>/publish/<job-id>).",
+)
+def publish_cmd(job_id: str, data_dir: Optional[Path], output: Optional[Path]) -> None:
+    """Export a job as a self-contained static site for sharing or deployment."""
+    root = data_dir or Path.cwd() / "data"
+    publish_dir = publish_job(root, job_id, output_root=output)
+    click.echo(f"Published static site: {publish_dir.resolve()}")
+    click.echo("Open locally:  python3 -m http.server 8080  (from that folder)")
+    click.echo("Public link:   upload the folder to https://app.netlify.com/drop")
 
 
 @main.command("regenerate-ui")

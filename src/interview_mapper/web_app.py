@@ -14,6 +14,8 @@ from urllib.parse import unquote, urlparse
 
 from .pipeline import create_job_root, finalize_upload_path, run_analysis, run_finalize
 from .upload_stream import extract_boundary, parse_multipart_file, stream_body_to_file
+from .face_sheet import _intro_roster_rows
+from .intro_clips import export_intro_clips
 
 JOBS: Dict[str, dict] = {}
 JOBS_LOCK = threading.Lock()
@@ -23,6 +25,16 @@ def _jobs_root(data_dir: Path) -> Path:
     root = data_dir / "jobs"
     root.mkdir(parents=True, exist_ok=True)
     return root
+
+
+def _resolve_output_dir(data_dir: Path, job_id: str) -> Optional[Path]:
+    job = _get_job(job_id)
+    if job and job.get("output_dir"):
+        return Path(job["output_dir"])
+    output_dir = _jobs_root(data_dir) / job_id / "output"
+    if (output_dir / "faces.json").exists():
+        return output_dir
+    return None
 
 
 def _set_job(job_id: str, **updates) -> dict:
@@ -39,6 +51,21 @@ def _get_job(job_id: str) -> Optional[dict]:
 
 FAST_MODE_LIMIT_S = 600.0
 FAST_FACE_SAMPLE_FPS = 1.0
+
+
+def _load_job_intros(output_dir: Path) -> List[dict]:
+    if not output_dir.exists():
+        return []
+    export_intro_clips(output_dir)
+    rows = _intro_roster_rows(output_dir)
+    return rows
+
+
+def _load_spoken_labels(output_dir: Path) -> dict:
+    labels_path = output_dir / "labels.json"
+    if labels_path.exists():
+        return json.loads(labels_path.read_text(encoding="utf-8"))
+    return {}
 
 
 def _run_job(
@@ -65,14 +92,19 @@ def _run_job(
             progress=progress,
         )
         faces_payload = json.loads((output_dir / "faces.json").read_text(encoding="utf-8"))
+        spoken_labels = _load_spoken_labels(output_dir)
+        intros = _load_job_intros(output_dir)
         _set_job(
             job_id,
             status="ready",
-            message="Analysis complete. Add names and generate exports.",
+            message="Analysis complete. Review introductions and confirm names.",
             output_dir=str(output_dir),
             face_clusters=faces_payload.get("face_clusters", []),
             face_cluster_count=result.face_cluster_count,
             speaker_segment_count=result.speaker_segment_count,
+            spoken_labels=spoken_labels,
+            intros=intros,
+            intro_count=len(intros),
             error=None,
         )
     except Exception as exc:  # noqa: BLE001 - surface processing errors to the UI
@@ -96,6 +128,17 @@ UPLOAD_PAGE = """<!DOCTYPE html>
     .hint { color: #9a9a9a; font-size: 13px; line-height: 1.5; }
     .status { margin-top: 16px; padding: 12px; border-radius: 10px; background: #222; }
     .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 14px; margin-top: 16px; }
+    .intro-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 18px; margin-top: 16px; }
+    .intro-card { background: #141414; border: 1px solid #333; border-radius: 14px; padding: 16px; display: flex; flex-direction: column; gap: 10px; }
+    .intro-card video { width: 100%; aspect-ratio: 16 / 9; border-radius: 10px; background: #000; object-fit: contain; }
+    .intro-card .face-thumb { width: 88px; height: 88px; object-fit: cover; border-radius: 8px; border: 1px solid #444; }
+    .intro-card .thumb-row { display: flex; align-items: center; gap: 8px; color: #8f8f8f; font-size: 12px; font-weight: 600; }
+    .intro-card .name { font-size: 24px; font-weight: 700; margin: 0; }
+    .intro-card .timecode { display: inline-block; align-self: flex-start; background: #4f7cff; color: #fff; font-size: 12px; font-weight: 700; padding: 4px 10px; border-radius: 999px; }
+    .intro-card .location, .intro-card .spelling, .intro-card .pronunciation { color: #bdbdbd; font-size: 14px; line-height: 1.4; }
+    .intro-card .label { color: #7d7d7d; font-size: 11px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; margin-right: 6px; }
+    .intro-card .quote { color: #d8d8d8; font-size: 14px; line-height: 1.45; border-top: 1px solid #2d2d2d; padding-top: 10px; margin-top: 4px; font-style: italic; }
+    .intro-card .face-id { color: #8f8f8f; font-size: 12px; }
     .face-card img { width: 100%; border-radius: 8px; aspect-ratio: 1; object-fit: cover; background: #000; }
     .face-card input { width: 100%; margin-top: 8px; padding: 8px; border-radius: 8px; border: 1px solid #444; background: #111; color: #fff; box-sizing: border-box; }
     .downloads a { display: block; margin-top: 8px; color: #9eb7ff; }
@@ -111,8 +154,8 @@ UPLOAD_PAGE = """<!DOCTYPE html>
 <body>
   <main>
     <h1>Upload interview clips</h1>
-    <p class="hint">Upload your wide-shot master plus any solo intro clips or extra angles. Faces and on-camera name introductions are detected across <strong>all</strong> uploaded clips. Lower-thirds and speaker timing use the main clip only.</p>
-    <p class="hint">Large files can take a while to upload before analysis starts. By default, only the first 10 minutes of each clip are analyzed for speed.</p>
+    <p class="hint">Upload your wide-shot master plus any solo intro clips or extra angles. Whisper transcribes on-camera introductions for <strong>name, location, and quote</strong>, and the site generates a short <strong>intro clip</strong> for each person so you can confirm on camera. Faces are detected across all uploaded clips. Lower-thirds and speaker timing use the main clip only.</p>
+    <p class="hint">Large files can take a while to upload before analysis starts. Check <strong>Analyze the full length</strong> if introductions happen after 10 minutes.</p>
 
     <form id="uploadForm" class="card" enctype="multipart/form-data" method="post" action="/upload">
       <label>Main clip — wide shot / master (required)
@@ -134,10 +177,10 @@ UPLOAD_PAGE = """<!DOCTYPE html>
       <div id="statusText" class="status">Uploading...</div>
       <div id="progressBar" class="progress hidden"><div id="progressFill"></div></div>
       <div id="sheetSection" class="hidden">
-        <h2>All introductions at once</h2>
-        <p class="hint">Every detected name with their on-screen face and the exact time they introduced themselves.</p>
-        <img id="introRosterPreview" class="preview hidden" alt="All introductions roster" />
-        <div class="downloads" id="sheetDownloads"></div>
+        <h2>Review on-camera introductions</h2>
+        <p class="hint">Whisper transcribes each intro for name, location, and quote. Play the clip to confirm each person on camera.</p>
+        <div id="introGrid" class="intro-grid"></div>
+        <div class="downloads" id="sheetDownloads" style="margin-top:18px;"></div>
       </div>
       <div id="labelSection" class="hidden">
         <h2>Name each person</h2>
@@ -157,7 +200,7 @@ UPLOAD_PAGE = """<!DOCTYPE html>
     const statusText = document.getElementById("statusText");
     const sheetSection = document.getElementById("sheetSection");
     const sheetDownloads = document.getElementById("sheetDownloads");
-    const introRosterPreview = document.getElementById("introRosterPreview");
+    const introGrid = document.getElementById("introGrid");
     const labelSection = document.getElementById("labelSection");
     const resultSection = document.getElementById("resultSection");
     const faceGrid = document.getElementById("faceGrid");
@@ -258,18 +301,70 @@ UPLOAD_PAGE = """<!DOCTYPE html>
       if (job.status === "error") {
         return;
       }
+      renderIntros(job.intros || []);
       renderSheetDownloads();
       sheetSection.classList.remove("hidden");
-      renderFaces(job.face_clusters || []);
+      renderFaces(job.face_clusters || [], job.spoken_labels || {});
       labelSection.classList.remove("hidden");
     }
 
+    function thumbUrl(filePath) {
+      if (!filePath) return "";
+      return `/jobs/${currentJobId}/file/${filePath}`;
+    }
+
+    function renderIntros(intros) {
+      introGrid.innerHTML = "";
+      if (!intros.length) {
+        introGrid.innerHTML = '<p class="hint">No on-camera introductions were detected. Try full-length analysis if intros are after 10 minutes.</p>';
+        return;
+      }
+      intros.forEach((intro) => {
+        const card = document.createElement("article");
+        card.className = "intro-card";
+        const thumb = thumbUrl(intro.thumbnail_file);
+        const clip = thumbUrl(intro.intro_clip_file);
+        const details = [];
+        if (intro.location) {
+          details.push(`<div class="location"><span class="label">From</span> ${intro.location}</div>`);
+        }
+        if (intro.pronunciation) {
+          details.push(`<div class="pronunciation"><span class="label">Pronunciation</span> ${intro.pronunciation}</div>`);
+        }
+        if (intro.name_spelling) {
+          details.push(`<div class="spelling"><span class="label">Spelling</span> ${intro.name_spelling}</div>`);
+        }
+        if (intro.name_heard && intro.name_heard !== intro.name) {
+          details.push(`<div class="heard"><span class="label">Heard as</span> ${intro.name_heard}</div>`);
+        }
+        if (intro.spelling_note) {
+          details.push(`<div class="note">${intro.spelling_note}</div>`);
+        }
+        if (intro.intro_clip_faces_visible) {
+          details.push(`<div class="faces-visible"><span class="label">On camera</span> Up to ${intro.intro_clip_faces_visible} people visible in clip</div>`);
+        }
+        if (intro.intro_clip_includes_full_cast) {
+          details.push(`<div class="full-cast"><span class="label">Full cast</span> Clip ends with a wide shot showing everyone on camera</div>`);
+        }
+        const poster = thumb ? ` poster="${thumb}"` : "";
+        card.innerHTML = `
+          ${clip
+            ? `<video controls playsinline preload="metadata" src="${clip}"${poster}></video>`
+            : (thumb ? `<img src="${thumb}" alt="${intro.name}" style="width:100%;aspect-ratio:1;object-fit:cover;border-radius:10px;" />` : '<p class="hint">Intro clip unavailable</p>')}
+          ${clip && thumb ? `<div class="thumb-row"><img class="face-thumb" src="${thumb}" alt="${intro.name}" /> Face at intro</div>` : ""}
+          <div class="timecode">${intro.timecode || ""}</div>
+          <div class="name">${intro.name}</div>
+          ${details.join("")}
+          <div class="face-id">${intro.face_id ? `Mapped to ${intro.face_id}` : "Face cluster not mapped"}</div>
+          <div class="quote">"${intro.transcript || ""}"</div>
+        `;
+        introGrid.appendChild(card);
+      });
+    }
+
     function renderSheetDownloads() {
-      introRosterPreview.src = `/jobs/${currentJobId}/file/intro_roster.jpg?ts=${Date.now()}`;
-      introRosterPreview.classList.remove("hidden");
-      introRosterPreview.onerror = () => introRosterPreview.classList.add("hidden");
       sheetDownloads.innerHTML = `
-        <a href="/jobs/${currentJobId}/file/intro_roster.html" target="_blank"><strong>Open all introductions (faces + times)</strong></a>
+        <a href="/jobs/${currentJobId}/file/intro_roster.html" target="_blank"><strong>Open full intro roster page</strong></a>
         <a href="/jobs/${currentJobId}/file/intro_roster.jpg" target="_blank">Open intro roster image</a>
         <a href="/jobs/${currentJobId}/file/intro_roster.csv" download>Download intro roster CSV</a>
         <a href="/jobs/${currentJobId}/file/cast_sheet.jpg" target="_blank">Open cast sheet (face clusters)</a>
@@ -278,7 +373,7 @@ UPLOAD_PAGE = """<!DOCTYPE html>
       `;
     }
 
-    function renderFaces(clusters) {
+    function renderFaces(clusters, spokenLabels) {
       faceGrid.innerHTML = "";
       clusters.forEach((cluster) => {
         const card = document.createElement("div");
@@ -286,9 +381,10 @@ UPLOAD_PAGE = """<!DOCTYPE html>
         const thumb = cluster.thumbnail_path.includes("/")
           ? cluster.thumbnail_path.split("/").pop()
           : cluster.thumbnail_path.replace("face_thumbnails/", "");
+        const preset = spokenLabels[cluster.cluster_id] || "";
         card.innerHTML = `
           <img src="/jobs/${currentJobId}/file/face_thumbnails/${thumb}" alt="${cluster.cluster_id}" />
-          <input data-id="${cluster.cluster_id}" placeholder="Full name" />
+          <input data-id="${cluster.cluster_id}" placeholder="Full name" value="${preset.replace(/"/g, "&quot;")}" />
         `;
         faceGrid.appendChild(card);
       });
@@ -313,9 +409,10 @@ UPLOAD_PAGE = """<!DOCTYPE html>
       statusText.textContent = "Done.";
       resultSection.classList.remove("hidden");
       screengrab.src = `/jobs/${currentJobId}/file/named_screengrab.jpg?ts=${Date.now()}`;
+      renderIntros(payload.intros || []);
       renderSheetDownloads();
       downloads.innerHTML = `
-        <a href="/jobs/${currentJobId}/file/intro_roster.html" target="_blank"><strong>Open all introductions (faces + times)</strong></a>
+        <a href="/jobs/${currentJobId}/file/intro_roster.html" target="_blank"><strong>Open full intro roster page</strong></a>
         <a href="/jobs/${currentJobId}/file/intro_roster.jpg" target="_blank">Open intro roster image</a>
         <a href="/jobs/${currentJobId}/file/intro_roster.csv" download>Download intro roster CSV</a>
         <a href="/jobs/${currentJobId}/file/cast_sheet.jpg" target="_blank">Open cast sheet (face clusters)</a>
@@ -379,6 +476,16 @@ class InterviewMapperHandler(BaseHTTPRequestHandler):
             self._send_json({"status": "ok", "service": "interview-face-mapper"})
             return
 
+        if path.startswith("/api/jobs/") and path.endswith("/intros"):
+            job_id = path.split("/api/jobs/", 1)[1].rsplit("/intros", 1)[0].strip("/")
+            job = _get_job(job_id)
+            if not job or not job.get("output_dir"):
+                self._send_json({"error": "Job not found"}, status=HTTPStatus.NOT_FOUND)
+                return
+            intros = _load_job_intros(Path(job["output_dir"]))
+            self._send_json({"intros": intros, "spoken_labels": _load_spoken_labels(Path(job["output_dir"]))})
+            return
+
         if path.startswith("/api/jobs/"):
             job_id = path.split("/api/jobs/", 1)[1].strip("/")
             job = _get_job(job_id)
@@ -391,15 +498,15 @@ class InterviewMapperHandler(BaseHTTPRequestHandler):
         if path.startswith("/jobs/") and "/file/" in path:
             _, remainder = path.split("/jobs/", 1)
             job_id, _, rel_path = remainder.partition("/file/")
-            job = _get_job(job_id)
-            if not job or not job.get("output_dir"):
+            output_dir = _resolve_output_dir(self.data_dir, job_id)
+            if not output_dir:
                 self.send_error(HTTPStatus.NOT_FOUND)
                 return
             safe_rel = Path(unquote(rel_path))
             if safe_rel.is_absolute() or ".." in safe_rel.parts:
                 self.send_error(HTTPStatus.BAD_REQUEST)
                 return
-            self._send_file(Path(job["output_dir"]) / safe_rel)
+            self._send_file(output_dir / safe_rel)
             return
 
         self.send_error(HTTPStatus.NOT_FOUND)
@@ -531,8 +638,17 @@ class InterviewMapperHandler(BaseHTTPRequestHandler):
             self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
             return
 
-        _set_job(job_id, status="complete", message="Exports ready.", exports=exports)
-        self._send_json({"status": "complete", "exports": exports})
+        output_dir = Path(job["output_dir"])
+        intros = _load_job_intros(output_dir)
+        _set_job(
+            job_id,
+            status="complete",
+            message="Exports ready.",
+            exports=exports,
+            intros=intros,
+            spoken_labels=labels,
+        )
+        self._send_json({"status": "complete", "exports": exports, "intros": intros})
 
 
 def create_server(host: str, port: int, data_dir: Path) -> ThreadingHTTPServer:
