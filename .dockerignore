@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+.git/
+data/jobs/
+data/publish/
+*_mapper_output/
+.DS_Store

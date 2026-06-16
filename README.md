@@ -10,7 +10,22 @@ Built for **single wide-shot interviews** where multiple people are visible at o
 4. Lets you manually label each face cluster with a display name
 5. Exports lower-third timing files for your edit
 
-## Quick start
+## Live web app (public URL)
+
+This tool needs a server with **ffmpeg**, **~2 GB RAM**, and enough disk for uploaded videos. Deploy from GitHub in one click:
+
+**[Deploy to Render →](https://render.com/deploy?repo=https://github.com/eheckman06/interview-face-mapper)**
+
+1. Sign in to [Render](https://render.com) (free to sign up).
+2. Click the link above — it reads `render.yaml` from the repo.
+3. Choose the **Starter** plan (recommended for Whisper + face detection).
+4. Click **Apply** — Render builds the Docker image and gives you a URL like `https://interview-face-mapper.onrender.com`.
+
+Anyone with that URL can upload MP4s and run the full face-mapping workflow in their browser.
+
+**Alternatives:** Fly.io (`fly deploy` with the included `fly.toml`) or any host that runs the Docker image on port `10000` with `/health` as the health check.
+
+## Quick start (local)
 
 ```bash
 cd ~/Projects/interview-face-mapper

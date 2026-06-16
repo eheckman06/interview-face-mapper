@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: interview-face-mapper
+    runtime: docker
+    region: oregon
+    plan: starter
+    healthCheckPath: /health
+    envVars:
+      - key: HOST
+        value: 0.0.0.0
+      - key: DATA_DIR
+        value: /app/data
+    disk:
+      name: interview-data
+      mountPath: /app/data
+      sizeGB: 1
